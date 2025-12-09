@@ -6,10 +6,8 @@ function syncResourcesWithSW(sw, meta) {
         channel.port1.onmessage = (event) => {
             const data = event.data;
             if (data.type === 'UPDATE_COMPLETE') {
-                // 成功：解析 Promise，返回更新数量
                 resolve(data.updatedCount);
             } else if (data.type === 'UPDATE_ERROR') {
-                // 失败：拒绝 Promise
                 reject(data.error);
             }
         };
@@ -20,49 +18,58 @@ function syncResourcesWithSW(sw, meta) {
         }, [channel.port2]);
     });
 }
-async function registerAndAwaitSW(url) {
-    // 1. 注册 Service Worker，并设置更新策略
-    const registration = await navigator.serviceWorker.register(url, { scope: '/', updateViaCache: 'none' });
-    // 2. 立即触发更新检查（确保及时发现 sw.js 的字节变化）
-    registration.update();
-     // 3. 等待 SW 达到 ready 状态（安装/激活完成）
+async function registerAndAwaitSW(meta) {
+    const worker = meta.worker;
+    const scope = '/'; // 你的 Service Worker 作用域
+    const registrationUrl = `${worker.url}?v=${worker.version}`;
+    let needUpdate = false
+    let registration = null
+    const currentRegistration = await navigator.serviceWorker.getRegistration(scope);
+    if (currentRegistration) {
+        const activeSW = currentRegistration.active;
+        if (activeSW && activeSW.scriptURL) {
+            const urlObj = new URL(activeSW.scriptURL);
+            const currentVersionUrl = urlObj.pathname + urlObj.search; 
+            if (currentVersionUrl !== registrationUrl) {
+                needUpdate = true;
+            }
+        } else {
+            needUpdate = true;
+        }
+    } else {
+        needUpdate = true;
+    }
+    if (needUpdate) { 
+        registration = await navigator.serviceWorker.register(registrationUrl, { scope: '/', updateViaCache: 'none' });
+        await registration.update();
+    } else {
+        registration = await navigator.serviceWorker.register(registrationUrl, { scope: scope });
+    }
+
+    // 等待 SW 达到 ready 状态（安装/激活完成）
     await navigator.serviceWorker.ready; 
-    // =========================================================
-    // 4. 关键修正：确保 SW 实例已接管
-    // =========================================================
-    // 获取当前控制页面的 SW 实例
     let swController = navigator.serviceWorker.controller;
-    // 如果当前页面没有 controller，说明 SW 尚未接管。
-    if (!swController) {
-        // 4a. 检查 registration.active 是否存在。如果存在，它是新的 SW 实例。
-        // 在 skipWaiting/clients.claim 成功后，registration.active 应该就是接管者。
+    if (!swController && registration != null) {
         swController = registration.active;
     }
-    // 4b. 如果仍然没有 SW 实例，我们必须等待 controllerchange 事件。
     if (!swController) {
-        // 监听 controllerchange 事件
         const controllerChangePromise = new Promise(resolve => {
             navigator.serviceWorker.addEventListener('controllerchange', () => {
-                // 当事件触发时，controller 属性应该已经更新
                 resolve(navigator.serviceWorker.controller);
             }, { once: true });
-        }); 
-
-        // 等待接管完成
+        });
         swController = await controllerChangePromise;
     }
-    // 4c. 最终安全检查
     if (!swController) {
          throw new Error("Service Worker failed to claim control and returned null.");
     }
-    // 5. 返回最终接管页面的 Service Worker 实例
     return swController;
 }
 export const loadStyle = (src) => {
     return new Promise((resolve, reject) => {
         const link = document.createElement('link');
         link.rel = 'stylesheet';
-        link.href = src; // 浏览器会发起 fetch 请求
+        link.href = src;
         link.onload = resolve;
         link.onerror = reject;
         document.head.appendChild(link);
@@ -78,18 +85,18 @@ export const loadScript = (src) => {
         document.body.appendChild(script);
     });
 }
-export const boot = async (serviceWorker, meta) => {
+export const boot = async (meta) => {
     const META_URL = meta;
     try {
         if (!('serviceWorker' in navigator)) {
             throw new Error('Browser does not support Service Worker');
         }
-        // 1. 注册 Service Worker
-        const sw = await registerAndAwaitSW(serviceWorker); 
-
-        // 2. 获取服务端的 meta.json
+        // 1. 获取服务端的 meta.json
         const metaRes = await fetch(`${META_URL}?t=${Date.now()}`);
-        const meta = await metaRes.json(); 
+        const meta = await metaRes.json();
+
+        // 2. 注册 Service Worker
+        const sw = await registerAndAwaitSW(meta); 
 
         // 3. 更新资源
         const updatedCount = await syncResourcesWithSW(sw, meta);
@@ -106,6 +113,7 @@ export const boot = async (serviceWorker, meta) => {
                 loadPromises.push(loadStyle(cssUrl));
             });
         }
+        
         // 等待所有入口资源加载完毕
         await Promise.all(loadPromises); 
     } catch (e) {

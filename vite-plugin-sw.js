@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 const META_FILE_NAME = 'meta.json';
+const SW_FILE_NAME = 'sw.js';
 // 匹配并移除完整的 <script> 块 (包含开闭标签)
 const SCRIPT_TAGS_REGEX = /<script\s+[^>]*?crossorigin[^>]*?>(?:.|\n)*?<\/script>/gi;
 // 匹配并移除自闭合的 <link> 标签
@@ -9,11 +10,11 @@ const LINK_TAGS_REGEX = /<link\s+[^>]*?crossorigin[^>]*?>/gi;
 const LOADER_SCRIPT = `
     <script type="module">
       const module = await import(\`/loader.js?t=\${Date.now()}\`);
-      await module.boot('/sw.js', '/meta.json'); 
+      await module.boot('/meta.json');
     </script>
   `;
 const EXCLUDED_PUBLIC_FILES = new Set([
-    'sw.js', 
+    'sw.js',
     'loader.js'
 ]);
 function readJsonSync(filePath) {
@@ -21,6 +22,12 @@ function readJsonSync(filePath) {
     const fileContent = fs.readFileSync(filePath, 'utf8');
     // 2. 解析 JSON 字符串为 JS 对象
     return JSON.parse(fileContent);
+}
+function getContentHash(content){
+    return crypto.createHash('md5').update(content).digest('hex');
+}
+function getFileVersion(filePath) {
+    return getContentHash(fs.readFileSync(filePath));
 }
 function getAllFiles(dir, fileList = []) {
     const files = fs.readdirSync(dir);
@@ -48,7 +55,7 @@ export default function swBootstrapPlugin() {
     return {
         name: 'sw-bootstrap-plugin',
         enforce: 'post', // 确保在其他插件处理完资产后运行
-        
+
         configResolved(resolvedConfig) {
             config = resolvedConfig;
         },
@@ -61,16 +68,16 @@ export default function swBootstrapPlugin() {
             // 1. 遍历 bundle 对象，获取所有输出文件
             for (const fileName in bundle) {
                 const chunk = bundle[fileName];
-                
+
                 // 排除不需要缓存的文件：HTML、sourcemap、meta.json 自身
                 if (fileName.endsWith('.html') || fileName.endsWith('.map') || fileName === META_FILE_NAME) {
-                    continue; 
+                    continue;
                 }
 
                 // Rollup/Vite 输出的资产 (chunk) 类型
                 if (chunk.type === 'asset' || chunk.type === 'chunk') {
-                    const content = chunk.source || chunk.code; 
-                    
+                    const content = chunk.source || chunk.code;
+
                     if (content) {
                         // 2. 【关键判断】如果这是 Rollup 的入口文件
                         if (chunk.type === 'chunk' && chunk.isEntry) {
@@ -80,10 +87,10 @@ export default function swBootstrapPlugin() {
                         if (chunk.viteMetadata && chunk.viteMetadata.importedCss.size > 0) {
                             mainCssFiles = Array.from(chunk.viteMetadata.importedCss).map(cssName => `/${cssName}`);
                         }
-                        const hash = crypto.createHash('md5').update(content).digest('hex');
+                        const hash = getContentHash(content);
                         resources.push({
-                            file: `/${fileName}`, 
-                            type:`${chunk.type}`,
+                            file: `/${fileName}`,
+                            type: `${chunk.type}`,
                             md5: hash,
                         });
                     }
@@ -92,7 +99,7 @@ export default function swBootstrapPlugin() {
             // =========================================================
             // B. 【新增】处理 Public 目录文件
             // =========================================================
-            const publicDir = config.publicDir || path.join(process.cwd(), 'public'); 
+            const publicDir = config.publicDir || path.join(process.cwd(), 'public');
 
             if (fs.existsSync(publicDir)) {
                 const publicFiles = getAllFiles(publicDir);
@@ -106,8 +113,7 @@ export default function swBootstrapPlugin() {
                     const fileUrl = `/${relativePath}`; // Public 文件直接映射到根路径
 
                     // 3. 计算哈希
-                    const fileContent = fs.readFileSync(filePath);
-                    const hash = crypto.createHash('md5').update(fileContent).digest('hex');
+                    const hash = getFileVersion(filePath);
 
                     // 4. 添加到 resources (Public 文件被视为 'asset')
                     resources.push({
@@ -117,7 +123,8 @@ export default function swBootstrapPlugin() {
                     });
                 }
             }
-            
+            const swFile = path.join(process.cwd(), 'public/'+SW_FILE_NAME);
+            const hash = getFileVersion(swFile);
             // 4. 构建 meta.json 结构
             const packageJson = readJsonSync(packageJsonPath);
             const metaData = {
@@ -125,6 +132,10 @@ export default function swBootstrapPlugin() {
                 version: packageJson.version || '0.0.0',
                 entrypoint: entrypointFile, // 仍需手动配置或通过插件上下文获取
                 styles: mainCssFiles,
+                worker: {
+                    url: "/"+SW_FILE_NAME,
+                    version: hash
+                },
                 resources: resources,
             };
 
@@ -138,7 +149,7 @@ export default function swBootstrapPlugin() {
         // 钩子 1: 转换 HTML 内容
         transformIndexHtml(html) {
             if (config.command !== 'build') {
-                return html; 
+                return html;
             }
             let processedHtml = html;
             // 1. 移除所有 <script> 标签
@@ -148,10 +159,10 @@ export default function swBootstrapPlugin() {
             // 3. 在 </body> 之前添加 LOADER_SCRIPT
             processedHtml = processedHtml.replace(/<\/body>/i, `${LOADER_SCRIPT}</body>`);
             // 匹配一行或多行只包含空白字符（空格、制表符、换行符）的内容
-            processedHtml = processedHtml.replace(/(\r\n|\n|\r)\s*(\r\n|\n|\r)/gm, '\n'); 
+            processedHtml = processedHtml.replace(/(\r\n|\n|\r)\s*(\r\n|\n|\r)/gm, '\n');
             // 清理行首和行尾的多余空白
             processedHtml = processedHtml.replace(/(\r\n|\n|\r)\s*$/gm, '\n');
             return processedHtml
-        }, 
+        },
     };
 }
