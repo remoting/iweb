@@ -49,14 +49,20 @@ async function respondFromCacheOrFetch(request) {
         const resourceBlob = record.blob;
         const headers = { 
             'Status': 200, 
-            'Status-Text': 'OK' 
+            'Status-Text': 'OK',
+            'Server': "sw.js"
         };
+        if (resourceBlob.size){
+            headers['Content-Length'] = resourceBlob.size;
+        }
         if (resourceBlob.type) {
             headers['Content-Type'] = resourceBlob.type;
         } else if (url.pathname.endsWith('.js')) {
             headers['Content-Type'] = 'application/javascript';
         } else if (url.pathname.endsWith('.css')) {
             headers['Content-Type'] = 'text/css';
+        } else if (url.pathname.endsWith('.json')) {
+            headers['Content-Type'] = 'application/json';
         } else {
             headers['Content-Type'] = ' ';
         }

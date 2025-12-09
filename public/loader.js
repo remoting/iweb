@@ -30,7 +30,6 @@ async function registerAndAwaitSW(url) {
     // =========================================================
     // 4. 关键修正：确保 SW 实例已接管
     // =========================================================
-    
     // 获取当前控制页面的 SW 实例
     let swController = navigator.serviceWorker.controller;
     // 如果当前页面没有 controller，说明 SW 尚未接管。
@@ -59,7 +58,16 @@ async function registerAndAwaitSW(url) {
     // 5. 返回最终接管页面的 Service Worker 实例
     return swController;
 }
-
+export const loadStyle = (src) => {
+    return new Promise((resolve, reject) => {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = src; // 浏览器会发起 fetch 请求
+        link.onload = resolve;
+        link.onerror = reject;
+        document.head.appendChild(link);
+    });
+};
 export const loadScript = (src) => {
     return new Promise((resolve, reject) => {
         const script = document.createElement('script');
@@ -86,8 +94,20 @@ export const boot = async (serviceWorker, meta) => {
         // 3. 更新资源
         const updatedCount = await syncResourcesWithSW(sw, meta);
         console.log(`资源同步完成。已更新文件数量: ${updatedCount}`)
+
         // 4. 所有资源准备就绪，启动主程序
-        await loadScript(meta.entrypoint);
+        const loadPromises = [
+            loadScript(meta.entrypoint)
+        ];
+        
+        // 动态加载所有 CSS 入口点
+        if (meta.styles && Array.isArray(meta.styles)) {
+            meta.styles.forEach(cssUrl => {
+                loadPromises.push(loadStyle(cssUrl));
+            });
+        }
+        // 等待所有入口资源加载完毕
+        await Promise.all(loadPromises); 
     } catch (e) {
         console.error('Boot failed:', e);
     }

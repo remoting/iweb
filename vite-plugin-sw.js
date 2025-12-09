@@ -2,11 +2,45 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 const META_FILE_NAME = 'meta.json';
+// 匹配并移除完整的 <script> 块 (包含开闭标签)
+const SCRIPT_TAGS_REGEX = /<script\s+[^>]*?crossorigin[^>]*?>(?:.|\n)*?<\/script>/gi;
+// 匹配并移除自闭合的 <link> 标签
+const LINK_TAGS_REGEX = /<link\s+[^>]*?crossorigin[^>]*?>/gi;
+const LOADER_SCRIPT = `
+    <script type="module">
+      const module = await import(\`/loader.js?t=\${Date.now()}\`);
+      await module.boot('/sw.js', '/meta.json'); 
+    </script>
+  `;
+const EXCLUDED_PUBLIC_FILES = new Set([
+    'sw.js', 
+    'loader.js'
+]);
 function readJsonSync(filePath) {
     // 1. 读取文件内容（同步），指定编码为 utf8（避免返回 Buffer）
     const fileContent = fs.readFileSync(filePath, 'utf8');
     // 2. 解析 JSON 字符串为 JS 对象
     return JSON.parse(fileContent);
+}
+function getAllFiles(dir, fileList = []) {
+    const files = fs.readdirSync(dir);
+
+    files.forEach(file => {
+        const filePath = path.join(dir, file);
+        const stat = fs.statSync(filePath);
+
+        if (stat.isDirectory()) {
+            // 递归扫描子目录
+            getAllFiles(filePath, fileList);
+        } else {
+            // 【关键修正】在推入列表前检查文件名是否在排除集合中
+            if (!EXCLUDED_PUBLIC_FILES.has(file)) {
+                fileList.push(filePath);
+            }
+        }
+    });
+
+    return fileList;
 }
 export default function swBootstrapPlugin() {
     let config;
@@ -23,6 +57,7 @@ export default function swBootstrapPlugin() {
             const packageJsonPath = path.join(process.cwd(), 'package.json');
             const resources = [];
             let entrypointFile = null; // 👈 新增变量，用于存储入口文件路径
+            let mainCssFiles = []; // 👈 存储主 CSS 文件列表
             // 1. 遍历 bundle 对象，获取所有输出文件
             for (const fileName in bundle) {
                 const chunk = bundle[fileName];
@@ -41,6 +76,10 @@ export default function swBootstrapPlugin() {
                         if (chunk.type === 'chunk' && chunk.isEntry) {
                             entrypointFile = `/${fileName}`;
                         }
+                        // 识别 CSS 入口：捕获该 JS Chunk 依赖的所有 CSS 文件名
+                        if (chunk.viteMetadata && chunk.viteMetadata.importedCss.size > 0) {
+                            mainCssFiles = Array.from(chunk.viteMetadata.importedCss).map(cssName => `/${cssName}`);
+                        }
                         const hash = crypto.createHash('md5').update(content).digest('hex');
                         resources.push({
                             file: `/${fileName}`, 
@@ -50,6 +89,34 @@ export default function swBootstrapPlugin() {
                     }
                 }
             }
+            // =========================================================
+            // B. 【新增】处理 Public 目录文件
+            // =========================================================
+            const publicDir = config.publicDir || path.join(process.cwd(), 'public'); 
+
+            if (fs.existsSync(publicDir)) {
+                const publicFiles = getAllFiles(publicDir);
+
+                for (const filePath of publicFiles) {
+                    // 1. 排除 public 目录本身
+                    if (fs.statSync(filePath).isDirectory()) continue;
+
+                    // 2. 计算相对于 publicDir 的路径 (即 URL 路径)
+                    const relativePath = path.relative(publicDir, filePath).replace(/\\/g, '/');
+                    const fileUrl = `/${relativePath}`; // Public 文件直接映射到根路径
+
+                    // 3. 计算哈希
+                    const fileContent = fs.readFileSync(filePath);
+                    const hash = crypto.createHash('md5').update(fileContent).digest('hex');
+
+                    // 4. 添加到 resources (Public 文件被视为 'asset')
+                    resources.push({
+                        file: fileUrl,
+                        type: 'asset',
+                        md5: hash,
+                    });
+                }
+            }
             
             // 4. 构建 meta.json 结构
             const packageJson = readJsonSync(packageJsonPath);
@@ -57,6 +124,7 @@ export default function swBootstrapPlugin() {
                 name: packageJson.name || 'app',
                 version: packageJson.version || '0.0.0',
                 entrypoint: entrypointFile, // 仍需手动配置或通过插件上下文获取
+                styles: mainCssFiles,
                 resources: resources,
             };
 
@@ -66,50 +134,24 @@ export default function swBootstrapPlugin() {
                 fileName: META_FILE_NAME,                  // 文件名
                 type: 'asset',                             // 标记为资产类型
             };
-        }
-        // // 钩子 1: 转换 HTML 内容
-        // transformIndexHtml(html) {
-        //     // 找到旧的 loader.js 脚本，并替换为新的动态引导脚本
-        //     if (HTML_REPLACE_REGEX.test(html)) {
-        //         return html.replace(HTML_REPLACE_REGEX, LOADER_SCRIPT);
-        //     }
-        //     // 如果找不到，可以在 </body> 之前添加
-        //     return html.replace(/<\/body>/i, `${LOADER_SCRIPT}</body>`);
-        // },
-
-        // // 钩子 2: 构建完成后生成 meta.json
-        // async closeBundle() {
-        //     const outDir = config.build.outDir;
-        //     const packageJsonPath = path.join(process.cwd(), 'package.json');
-            
-        //     // 1. 扫描 dist 目录
-        //     const files = fs.readdirSync(outDir, { recursive: true, withFileTypes: true })
-        //                     .filter(dirent => dirent.isFile() && !dirent.name.endsWith('.map') && dirent.name !== 'index.html' && dirent.name !== META_FILE_NAME)
-        //                     .map(dirent => path.join(dirent.path, dirent.name).replace(outDir, '').replace(/\\/g, '/'));
-
-        //     const resources = files.map(file => {
-        //         const filePath = path.join(outDir, file);
-        //         const urlPath = file.startsWith('/') ? file : `/${file}`;
-                
-        //         return {
-        //             file: urlPath,
-        //             md5: calculateFileHash(filePath),
-        //         };
-        //     });
-
-        //     // 2. 构建 meta.json 结构
-        //     const packageJson = fs.readJsonSync(packageJsonPath);
-        //     const metaData = {
-        //         name: packageJson.name || 'app',
-        //         version: packageJson.version || '0.0.0',
-        //         entrypoint: '/js/aa.js', // **注意：需要手动配置**
-        //         resources: resources,
-        //     };
-
-        //     // 3. 写入文件
-        //     await fs.writeJson(path.join(outDir, META_FILE_NAME), metaData, { spaces: 4 });
-
-        //     console.log(`\n✅ [SW Plugin] Generated ${resources.length} resources to ${META_FILE_NAME}`);
-        // }
+        },
+        // 钩子 1: 转换 HTML 内容
+        transformIndexHtml(html) {
+            if (config.command !== 'build') {
+                return html; 
+            }
+            let processedHtml = html;
+            // 1. 移除所有 <script> 标签
+            processedHtml = processedHtml.replace(SCRIPT_TAGS_REGEX, '');
+            // 2. 移除所有 <link> 标签 (自闭合)
+            processedHtml = processedHtml.replace(LINK_TAGS_REGEX, '');
+            // 3. 在 </body> 之前添加 LOADER_SCRIPT
+            processedHtml = processedHtml.replace(/<\/body>/i, `${LOADER_SCRIPT}</body>`);
+            // 匹配一行或多行只包含空白字符（空格、制表符、换行符）的内容
+            processedHtml = processedHtml.replace(/(\r\n|\n|\r)\s*(\r\n|\n|\r)/gm, '\n'); 
+            // 清理行首和行尾的多余空白
+            processedHtml = processedHtml.replace(/(\r\n|\n|\r)\s*$/gm, '\n');
+            return processedHtml
+        }, 
     };
 }
