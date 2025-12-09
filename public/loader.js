@@ -91,30 +91,19 @@ export const boot = async (meta) => {
         if (!('serviceWorker' in navigator)) {
             throw new Error('Browser does not support Service Worker');
         }
-        // 1. 获取服务端的 meta.json
         const metaRes = await fetch(`${META_URL}?t=${Date.now()}`);
         const meta = await metaRes.json();
-
-        // 2. 注册 Service Worker
-        const sw = await registerAndAwaitSW(meta); 
-
-        // 3. 更新资源
+        const sw = await registerAndAwaitSW(meta);
         const updatedCount = await syncResourcesWithSW(sw, meta);
         console.log(`资源同步完成。已更新文件数量: ${updatedCount}`)
-
-        // 4. 所有资源准备就绪，启动主程序
         const loadPromises = [
             loadScript(meta.entrypoint)
         ];
-        
-        // 动态加载所有 CSS 入口点
         if (meta.styles && Array.isArray(meta.styles)) {
             meta.styles.forEach(cssUrl => {
                 loadPromises.push(loadStyle(cssUrl));
             });
         }
-        
-        // 等待所有入口资源加载完毕
         await Promise.all(loadPromises); 
     } catch (e) {
         console.error('Boot failed:', e);

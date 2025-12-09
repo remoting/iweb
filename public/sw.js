@@ -156,14 +156,11 @@ self.addEventListener('message', async (event) => {
             // 遍历 meta.json 中的资源列表
             for (const res of resources) {
                 const existing = await getResourceFromDB(res.file);
-                
-                // 如果不存在，或者 MD5 变了，就需要下载
                 if (!existing || existing.md5 !== res.md5) {
                     missingOrChanged.push(res);
                 }
             } 
             // 并行下载并更新 IndexedDB
-            // 注意：这里加个时间戳防止 fetch 被浏览器 HTTP 缓存拦截
             await Promise.all(missingOrChanged.map(async (res) => {
                 const response = await fetch(`${res.file}?v=${res.md5}`);
                 if (!response.ok) throw new Error(`Failed to load ${res.file}`);
