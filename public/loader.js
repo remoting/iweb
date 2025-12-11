@@ -18,63 +18,77 @@ function syncResourcesWithSW(sw, meta) {
         }, [channel.port2]);
     });
 }
-async function registerAndAwaitSW(meta) {
-    const worker = meta.worker;
-    const scope = '/'; // 你的 Service Worker 作用域
-    const registrationUrl = `${worker.url}?v=${worker.version}`;
-    let needUpdate = false
-    let registration = null
+/**
+ * 检查当前 Service Worker 是否需要更新
+ */
+function needsUpdate(currentRegistration, targetUrl) {
+    if (!currentRegistration) return true;
+    
+    const activeSW = currentRegistration.active;
+    if (!activeSW?.scriptURL) return true;
+    
+    const urlObj = new URL(activeSW.scriptURL);
+    const currentVersionUrl = urlObj.pathname + urlObj.search;
+    return currentVersionUrl !== targetUrl;
+}
 
+/**
+ * 等待 Service Worker 获得控制权
+ */
+async function waitForController(registration, timeout = 100) {
+    // 如果已经有 controller，直接返回
+    if (navigator.serviceWorker.controller) {
+        return navigator.serviceWorker.controller;
+    }
+
+    // 创建 controllerchange 监听器
     const controllerChangePromise = new Promise(resolve => {
-        navigator.serviceWorker.addEventListener('controllerchange', () => {
+        const handler = () => {
             resolve(navigator.serviceWorker.controller);
-        }, { once: true });
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', handler, { once: true });
     });
 
-    const currentRegistration = await navigator.serviceWorker.getRegistration(scope);
-    if (currentRegistration) {
-        const activeSW = currentRegistration.active;
-        if (activeSW && activeSW.scriptURL) {
-            const urlObj = new URL(activeSW.scriptURL);
-            const currentVersionUrl = urlObj.pathname + urlObj.search; 
-            if (currentVersionUrl !== registrationUrl) {
-                needUpdate = true;
-            }
-        } else {
-            needUpdate = true;
-        }
-    } else {
-        needUpdate = true;
+    // 创建超时 Promise
+    const timeoutPromise = new Promise(resolve => {
+        setTimeout(() => {
+            resolve(registration?.active || navigator.serviceWorker.controller);
+        }, timeout);
+    });
+
+    // 使用 race 等待 controller 就绪或超时
+    const controller = await Promise.race([controllerChangePromise, timeoutPromise]);
+    
+    if (!controller) {
+        throw new Error("Service Worker failed to claim control and returned null.");
     }
-    if (needUpdate) { 
-        registration = await navigator.serviceWorker.register(registrationUrl, { scope: '/', updateViaCache: 'none' });
+    
+    return controller;
+}
+
+async function registerAndAwaitSW(meta) {
+    const worker = meta.worker;
+    const scope = '/';
+    const registrationUrl = `${worker.url}?v=${worker.version}`;
+
+    // 检查是否需要更新
+    const currentRegistration = await navigator.serviceWorker.getRegistration(scope);
+    const shouldUpdate = needsUpdate(currentRegistration, registrationUrl);
+    
+    // 注册 Service Worker（如果需要更新，使用 updateViaCache: 'none' 强制更新）
+    const options = shouldUpdate ? {scope: scope, updateViaCache:'none'} : {}
+    const registration = await navigator.serviceWorker.register(registrationUrl, options);
+
+    // 如果需要更新，主动触发更新
+    if (shouldUpdate) {
         await registration.update();
-    } else {
-        registration = await navigator.serviceWorker.register(registrationUrl, { scope: scope });
     }
 
-    // 等待 SW 达到 ready 状态（安装/激活完成）
-    await navigator.serviceWorker.ready; 
-    let swController = navigator.serviceWorker.controller;
-    const timeoutPromise = new Promise(resolve => 
-        setTimeout(() => {
-            if (!swController && registration != null) {
-                resolve(registration.active);
-            }else{
-                resolve(navigator.serviceWorker.controller); 
-            }
-        }, 20)
-    );
-    if (!swController) {
-        swController = await Promise.race([
-            controllerChangePromise, 
-            timeoutPromise
-        ]);
-    }
-    if (!swController) {
-         throw new Error("Service Worker failed to claim control and returned null.");
-    }
-    return swController;
+    // 等待 Service Worker 达到 ready 状态
+    await navigator.serviceWorker.ready;
+
+    // 等待 Service Worker 获得控制权
+    return await waitForController(registration);
 }
 export const loadStyle = (src) => {
     return new Promise((resolve, reject) => {
