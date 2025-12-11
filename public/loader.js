@@ -60,7 +60,8 @@ async function waitForController(registration, timeout = 100) {
     const controller = await Promise.race([controllerChangePromise, timeoutPromise]);
     
     if (!controller) {
-        throw new Error("Service Worker failed to claim control and returned null.");
+        location.reload()
+        return null
     }
     
     return controller;
@@ -74,7 +75,7 @@ async function registerAndAwaitSW(meta) {
     // 检查是否需要更新
     const currentRegistration = await navigator.serviceWorker.getRegistration(scope);
     const shouldUpdate = needsUpdate(currentRegistration, registrationUrl);
-    
+
     // 注册 Service Worker（如果需要更新，使用 updateViaCache: 'none' 强制更新）
     const options = shouldUpdate ? {scope: scope, updateViaCache:'none'} : {}
     const registration = await navigator.serviceWorker.register(registrationUrl, options);
@@ -122,7 +123,10 @@ export const boot = async (meta) => {
 
         // 2. 注册 Service Worker
         const sw = await registerAndAwaitSW(meta);
-
+        if (sw == null) {
+            location.reload();
+            return;
+        }
         // 3. 更新资源
         const updatedCount = await syncResourcesWithSW(sw, meta);
         console.log(`资源同步完成。已更新文件数量: ${updatedCount}`)
